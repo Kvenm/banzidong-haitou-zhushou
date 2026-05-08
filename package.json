@@ -1,0 +1,23 @@
+{
+  "name": "haitou-assistant-next",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A lightweight redevelopment of the BOSS job application assistant.",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "verify:apply-logic": "node scripts/verify-geek-apply-logic.mjs",
+    "capture:job": "node scripts/capture-job-detail-once.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@geekgeekrun/puppeteer-extra-plugin-laodeng": "file:./vendor/laodeng",
+    "puppeteer": "^24.43.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-anonymize-ua": "^2.4.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}

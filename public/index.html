@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>海投助手 Next</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">海</div>
+        <div>
+          <strong>海投助手 Next</strong>
+          <span>半自动求职工作台</span>
+        </div>
+      </div>
+      <nav>
+        <button class="nav active" data-view="dashboard">数据看板</button>
+        <button class="nav" data-view="auth">BOSS 登录态</button>
+        <button class="nav" data-view="config">投递配置</button>
+        <button class="nav" data-view="candidates">候选确认</button>
+        <button class="nav" data-view="logs">运行日志</button>
+      </nav>
+      <div class="side-actions">
+        <button id="collectBtn" class="primary">开始采集</button>
+        <button id="applyBtn">投递已确认</button>
+        <button id="applyOriginalBtn" class="secondary">原始风格</button>
+      </div>
+    </aside>
+
+    <main>
+      <section class="topbar">
+          <div>
+            <h1 id="viewTitle">数据看板</h1>
+            <p id="viewSubTitle">查看候选池、确认进度和投递状态</p>
+          </div>
+        <div class="mode-pill" title="真实 BOSS 采集还未接入">当前：模拟采集</div>
+        <div class="top-actions">
+          <button id="exportBtn">导出数据</button>
+          <label class="file-button">
+            导入数据
+            <input id="importInput" type="file" accept="application/json" />
+          </label>
+        </div>
+      </section>
+
+      <section id="dashboard" class="view active">
+        <div class="stats-grid">
+          <article class="metric"><span>候选职位</span><strong id="statTotal">0</strong></article>
+          <article class="metric"><span>待确认</span><strong id="statPending">0</strong></article>
+          <article class="metric"><span>已确认</span><strong id="statConfirmed">0</strong></article>
+          <article class="metric"><span>待沟通</span><strong id="statApplying">0</strong></article>
+          <article class="metric"><span>已投递</span><strong id="statApplied">0</strong></article>
+          <article class="metric"><span>已拒绝</span><strong id="statRejected">0</strong></article>
+          <article class="metric"><span>回复率</span><strong id="statReplyRate">0%</strong></article>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>最近候选</h2>
+            <button data-view-jump="candidates">查看全部</button>
+          </div>
+          <div id="recentList" class="compact-list"></div>
+        </div>
+      </section>
+
+      <section id="auth" class="view">
+        <div class="panel auth-panel">
+          <div class="panel-head">
+            <div>
+              <h2>BOSS 登录态</h2>
+              <p class="muted">真实自动化需要登录凭据。请自己登录 BOSS 后导出 Cookie，再粘贴到这里。</p>
+            </div>
+            <span id="authBadge" class="status">未保存</span>
+          </div>
+          <form id="authForm" class="form-grid">
+            <label class="wide">
+              BOSS Cookie JSON
+              <textarea
+                name="bossCookieJson"
+                rows="8"
+                placeholder='粘贴 Cookie 数组，例如 [{"name":"...","value":"...","domain":".zhipin.com"}]'
+              ></textarea>
+            </label>
+            <label class="wide">
+              LocalStorage JSON，可选
+              <textarea
+                name="bossLocalStorageJson"
+                rows="5"
+                placeholder='如暂时没有可以留空，后续真实浏览器适配时再使用'
+              ></textarea>
+            </label>
+            <div class="wide auth-help">
+              <strong>推荐流程</strong>
+              <span>1. 用你自己的浏览器打开 BOSS 直聘并登录。</span>
+              <span>2. 使用 Cookie 编辑器扩展导出 zhipin.com 的 Cookie JSON。</span>
+              <span>3. 粘贴到这里保存。程序后续只读取本地凭据，不需要你的账号密码。</span>
+            </div>
+            <div class="wide form-actions">
+              <button type="button" id="clearAuthBtn">清空凭据</button>
+              <button type="button" id="captureCookieBtn" class="secondary">自动获取 Cookie</button>
+              <button type="submit" class="primary">保存登录态</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section id="config" class="view">
+        <form id="configForm" class="panel form-grid">
+          <label>
+            职位关键词
+            <textarea name="keywords" rows="3" placeholder="前端, Vue, React"></textarea>
+          </label>
+          <label>
+            城市
+            <textarea name="cities" rows="3" placeholder="北京, 上海, 深圳"></textarea>
+          </label>
+          <label>
+            最低薪资 K
+            <input name="salaryMin" type="number" min="0" />
+          </label>
+          <label>
+            最高薪资 K
+            <input name="salaryMax" type="number" min="0" />
+          </label>
+          <label>
+            工作经验
+            <input name="experience" placeholder="3-5年" />
+          </label>
+          <label>
+            每日投递上限
+            <input name="dailyApplyLimit" type="number" min="1" />
+          </label>
+          <label>
+            排除关键词
+            <textarea name="excludeKeywords" rows="3" placeholder="外包, 驻场"></textarea>
+          </label>
+          <label>
+            公司黑名单
+            <textarea name="blacklistCompanies" rows="3" placeholder="每行或逗号分隔"></textarea>
+          </label>
+          <label class="wide">
+            招呼语模板
+            <textarea name="greetingTemplates" rows="5" placeholder="支持 {职位名称}、{公司名称}、{城市}"></textarea>
+          </label>
+          <div class="wide form-actions">
+            <button type="submit" class="primary">保存配置</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="candidates" class="view">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>候选职位</h2>
+              <p class="muted">当前真实投递为半自动：先打开职位详情，再在 BOSS 页面点击“立即沟通”。</p>
+            </div>
+            <div class="filters">
+              <select id="statusFilter">
+                <option value="all">全部状态</option>
+                <option value="pending">待确认</option>
+                <option value="confirmed">已确认</option>
+                <option value="applying">待沟通</option>
+                <option value="applied">已投递</option>
+                <option value="replied">已回复</option>
+                <option value="rejected">已拒绝</option>
+              </select>
+              <button id="batchConfirmBtn">批量确认待确认</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>职位</th>
+                  <th>公司</th>
+                  <th>城市</th>
+                  <th>薪资</th>
+                  <th>状态</th>
+                  <th>匹配原因</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="candidateRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="logs" class="view">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>运行日志</h2>
+            <span class="muted">最近 300 条</span>
+          </div>
+          <div id="logList" class="log-list"></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

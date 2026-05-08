@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+# 本地运行数据与敏感信息，勿提交
+data/db.json
+data/captures/
+# 误放在 src 下的探测截图
+src/data/captures/
