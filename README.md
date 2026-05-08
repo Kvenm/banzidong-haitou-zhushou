@@ -81,8 +81,9 @@ git push
 
 ### 4. 提交前请注意
 
-- `.gitignore` 已忽略 `node_modules/`、`data/db.json`、`data/captures/` 等，**不要将真实 Cookie 与隐私数据提交上去**。  
-- 若误提交过敏感文件，需从 Git 历史中清除（可用 `git filter-repo` 等工具），并轮换 Cookie。
+- **`data/db.json` 不会进仓库**：已在 `.gitignore` 中，其中的 `bossCookieJson`、LocalStorage 等仅保存在你本机。  
+- **不要在源码里粘贴真实 Cookie**；本地测试脚本请使用 `data/db.json` 或环境变量 `BOSS_COOKIE_JSON`。  
+- 若历史上曾误将密钥提交到 GitHub，需从远程历史中清除（参见 GitHub 文档 *Removing sensitive data*），并建议**在 BOSS 端重新登录**使旧 Cookie 失效。
 
 ---
 

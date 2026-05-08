@@ -1,54 +1,44 @@
 #!/usr/bin/env node
+/**
+ * 本地调试：从 data/db.json（勿提交）或环境变量 BOSS_COOKIE_JSON 读取 Cookie。
+ * 勿在源码中粘贴真实 Cookie。
+ */
 
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer'
 
-const userCookies = [
-    {
-        "name": "__a",
-        "value": "23897323.1777798500.1778163659.1778164550.42.7.1.42",
-        "domain": ".zhipin.com",
-        "path": "/",
-        "httpOnly": false,
-        "secure": false,
-        "sameSite": "Lax"
-    },
-    {
-        "name": "__zp_stoken__",
-        "value": "3ac4gOkXDl8K5w7fCuUA2cE46KU5GTTpFOERPOkV5NDlFOkdBTifClcOHw5HCm8ORbcOXYsOBOyg4RkE6RU5GRk8YOEI5RUVHRznDhEM5OcKhOzUbwqzCucOdwpjDk27DiQl5C0cVP8OFC8S4wrkJPMK4KiluZlkJYh0dbBNiHxMJFxISElsUZRxkbRMQHxJZERUVEicmTMKlw4FHw4%2FDh8OOOsOBwo7DgkXDjEc5OUUqOznCqUMaTEdHOkI6xLjEuMWExLvFhcS4xLjFhMOTxIbDrMS4xYTEu8OGxLjEuMWEw7vDpsS4xLjFhMS7xIfCuT86wpHDh8KWxIrFjcSKw7bEp8KYwrrDqsK5w7fDhcOCwqfCi8KywpzCq8OEwqVcw4JeUMKWYMOBwoBiwrnDjVrDj8K6wr54wqhgw4BvZlLDjFt0acOAXcOHahMRYmccRRHCmGfDiA%3D%3D",
-        "domain": ".zhipin.com",
-        "path": "/",
-        "httpOnly": false,
-        "secure": false,
-        "sameSite": "Lax"
-    },
-    {
-        "name": "wt2",
-        "value": "DMajDYtnk5Y8eryQ7VJxP9ZChgOwXThcX-5DNY05w9L0jubMXHhmS8EFmLpzi1y6KekvW4RBoqEN-SbKjXIWCCA~~",
-        "domain": ".zhipin.com",
-        "path": "/",
-        "httpOnly": true,
-        "secure": false,
-        "sameSite": "Lax"
-    },
-    {
-        "name": "zp_at",
-        "value": "dRV9pqjuzJ0ejdfVWPCFVsm7LDHkDOVjVweClkyTFh4~",
-        "domain": ".zhipin.com",
-        "path": "/",
-        "httpOnly": true,
-        "secure": false,
-        "sameSite": "Lax"
-    },
-    {
-        "name": "lastCity",
-        "value": "101210100",
-        "domain": ".zhipin.com",
-        "path": "/",
-        "httpOnly": false,
-        "secure": false,
-        "sameSite": "Lax"
+const root = path.dirname(fileURLToPath(new URL('.', import.meta.url)))
+
+function loadCookies() {
+  const env = process.env.BOSS_COOKIE_JSON?.trim()
+  if (env) {
+    try {
+      return JSON.parse(env)
+    } catch {
+      console.error('BOSS_COOKIE_JSON 不是合法 JSON')
+      process.exit(1)
     }
-]
+  }
+  const dbPath = path.join(root, 'data', 'db.json')
+  try {
+    const db = JSON.parse(readFileSync(dbPath, 'utf8'))
+    const raw = db.auth?.bossCookieJson
+    if (raw && String(raw).trim()) return JSON.parse(String(raw))
+  } catch {
+    //
+  }
+  return null
+}
+
+const userCookies = loadCookies()
+if (!userCookies?.length) {
+  console.error(
+    '未找到 Cookie：请在 Web 里保存登录态生成 data/db.json，或导出后执行：\n  BOSS_COOKIE_JSON=\'[{"name":"wt2",...}]\' node test-user-cookie.mjs'
+  )
+  process.exit(1)
+}
 
 console.log('=== 测试用户 Cookie ===\n')
 
@@ -66,26 +56,25 @@ async function testCookie() {
 
   const page = await browser.newPage()
 
-  // 反检测
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
     window.chrome = { runtime: {} }
   })
 
-  await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+  await page.setUserAgent(
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+  )
 
-  // 设置 Cookie
   await page.setCookie(...userCookies)
   console.log('✓ Cookie 已设置')
 
-  // 访问 BOSS 首页
   console.log('正在访问 BOSS 首页...')
   await page.goto('https://www.zhipin.com/', {
     waitUntil: 'domcontentloaded',
     timeout: 15000
   })
 
-  await new Promise(resolve => setTimeout(resolve, 3000))
+  await new Promise((resolve) => setTimeout(resolve, 3000))
 
   const url = page.url()
   console.log(`当前页面: ${url}`)
@@ -102,7 +91,6 @@ async function testCookie() {
   } else {
     console.log('\n✅ Cookie 有效！')
 
-    // 尝试获取用户信息
     try {
       const info = await page.evaluate(() => {
         const nameEl = document.querySelector('.user-nav-name')
@@ -116,7 +104,6 @@ async function testCookie() {
         console.log(`✓ 登录用户: ${info.userName}`)
       }
 
-      // 测试打开一个职位页
       console.log('\n正在测试打开职位页...')
       const jobUrl = 'https://www.zhipin.com/job_detail/33c81237592c52cc1nJ_3Nm5EVNR.html'
       await page.goto(jobUrl, {
@@ -124,7 +111,7 @@ async function testCookie() {
         timeout: 20000
       })
 
-      await new Promise(resolve => setTimeout(resolve, 5000))
+      await new Promise((resolve) => setTimeout(resolve, 5000))
 
       const currentJobUrl = page.url()
       console.log(`职位页 URL: ${currentJobUrl}`)
@@ -132,7 +119,6 @@ async function testCookie() {
       if (jobUrl.includes('login')) {
         console.log('❌ 职位页跳转到登录页')
       } else {
-        // 检查按钮
         const buttonText = await page.evaluate(() => {
           const btn = document.querySelector('.job-detail-box .op-btn.op-btn-chat')
           return btn ? btn.innerHTML.trim() : null
