@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   batchUpdateStatus,
+  clearAllCandidateNewFlags,
   clearAuth,
   getSnapshot,
   pickConfirmedCandidatesForApply,
@@ -151,6 +152,11 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, {
       url: encryptJobId ? `https://www.zhipin.com/job_detail/${encryptJobId}.html` : null
     })
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/candidates/clear-new') {
+    sendJson(res, 200, await clearAllCandidateNewFlags())
     return
   }
 

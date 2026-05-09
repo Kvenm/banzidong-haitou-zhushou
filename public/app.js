@@ -4,6 +4,61 @@ const state = {
   statusFilter: 'all'
 }
 
+let reqTipHideTimer = null
+
+function ensureGlobalReqTooltip() {
+  let el = document.getElementById('globalReqTooltip')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'globalReqTooltip'
+    el.className = 'global-req-tooltip'
+    el.setAttribute('role', 'tooltip')
+    el.addEventListener('mouseenter', () => clearTimeout(reqTipHideTimer))
+    el.addEventListener('mouseleave', () => el.classList.remove('visible'))
+    document.body.appendChild(el)
+  }
+  return el
+}
+
+function bindCompanyReqTooltips(tbody) {
+  const tip = ensureGlobalReqTooltip()
+  tbody.querySelectorAll('.company-tip-trigger').forEach((trigger) => {
+    const id = trigger.dataset.candidateId
+    const show = () => {
+      clearTimeout(reqTipHideTimer)
+      const c = state.snapshot.candidates.find((x) => x.id === id)
+      const txt = String(c?.jobRequirement ?? '').trim()
+      if (!txt) return
+      tip.textContent = txt
+      tip.classList.add('visible')
+      const r = trigger.getBoundingClientRect()
+      const pad = 8
+      let left = r.left
+      let top = r.bottom + pad
+      tip.style.left = `${left}px`
+      tip.style.top = `${top}px`
+      requestAnimationFrame(() => {
+        const tr = tip.getBoundingClientRect()
+        if (tr.right > window.innerWidth - 8) {
+          left = Math.max(8, window.innerWidth - tr.width - 8)
+          tip.style.left = `${left}px`
+        }
+        if (tr.bottom > window.innerHeight - 8) {
+          top = Math.max(8, r.top - tr.height - pad)
+          tip.style.top = `${top}px`
+        }
+      })
+    }
+    const hide = () => {
+      reqTipHideTimer = setTimeout(() => tip.classList.remove('visible'), 120)
+    }
+    trigger.addEventListener('mouseenter', show)
+    trigger.addEventListener('mouseleave', hide)
+    trigger.addEventListener('focus', show)
+    trigger.addEventListener('blur', hide)
+  })
+}
+
 /** 投递在服务端异步执行，单次 refresh 往往早于 DB 更新；按本批 id 轮询快照直至不再「已确认」或超时 */
 let applySnapshotPollGen = 0
 let applySnapshotPollTimer = null
@@ -95,6 +150,9 @@ document.getElementById('statusFilter').addEventListener('change', (event) => {
   renderCandidates()
 })
 document.getElementById('batchConfirmBtn').addEventListener('click', batchConfirm)
+document.getElementById('clearNewBadgeBtn').addEventListener('click', () =>
+  clearNewBadges().catch((e) => toast(String(e.message || e)))
+)
 document.getElementById('exportBtn').addEventListener('click', exportData)
 document.getElementById('importInput').addEventListener('change', importData)
 
@@ -175,8 +233,15 @@ function renderCandidates() {
     .map(
       (item) => `
         <tr>
-          <td><strong>${escapeHtml(item.title)}</strong><div class="muted">${escapeHtml(item.experience || '')}</div></td>
-          <td>${escapeHtml(item.company)}</td>
+          <td>
+            <div class="title-cell">
+              ${item.isNew ? '<span class="badge-new" title="本轮采集新增">NEW</span>' : ''}
+              <strong>${escapeHtml(item.title)}</strong>
+              <div class="muted">${escapeHtml(item.experience || '')}</div>
+            </div>
+          </td>
+          ${renderCompanyCell(item)}
+          <td class="th-scale">${escapeHtml(item.companyScale || '—')}</td>
           <td>${escapeHtml(item.city)}</td>
           <td>${escapeHtml(item.salary)}</td>
           <td><span class="status ${item.status}">${statusText[item.status] ?? item.status}</span></td>
@@ -216,6 +281,16 @@ function renderCandidates() {
       window.open(result.url, '_blank')
     })
   })
+  bindCompanyReqTooltips(tbody)
+}
+
+function renderCompanyCell(item) {
+  const req = String(item.jobRequirement ?? '').trim()
+  const name = escapeHtml(item.company)
+  if (!req) {
+    return `<td>${name}</td>`
+  }
+  return `<td class="company-cell"><span class="company-tip-trigger" tabindex="0" data-candidate-id="${escapeHtml(item.id)}">${name}</span></td>`
 }
 
 function renderRecent() {
@@ -296,8 +371,13 @@ async function captureCookie() {
 }
 
 async function collectJobs() {
-  await api('/api/collect', { method: 'POST' })
-  toast('采集完成')
+  const result = await api('/api/collect', { method: 'POST' })
+  const n = Array.isArray(result.candidates) ? result.candidates.length : 0
+  toast(
+    n > 0
+      ? `采集完成，新增 ${n} 条（已写入候选）`
+      : '采集结束：本次没有新入库职位，请打开「运行日志」查看原因（常见：均已投过/已拒绝被过滤，或需换关键词与城市）'
+  )
   await refresh()
 }
 
@@ -342,6 +422,12 @@ async function batchConfirm() {
     body: { ids, status: 'confirmed' }
   })
   toast(`已确认 ${ids.length} 个候选`)
+  await refresh()
+}
+
+async function clearNewBadges() {
+  const r = await api('/api/candidates/clear-new', { method: 'POST' })
+  toast(r.cleared ? `已清除 ${r.cleared} 条 NEW 角标` : '当前没有 NEW 角标')
   await refresh()
 }
 

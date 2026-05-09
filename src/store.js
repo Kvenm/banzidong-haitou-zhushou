@@ -35,7 +35,9 @@ const defaultDb = {
   logs: [],
   meta: {
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    /** 已投递 / 已回复 / 已拒绝 的 BOSS 职位 sourceId，持久化便于日后删行后仍不重复采集 */
+    excludedSourceIds: []
   }
 }
 
@@ -75,6 +77,37 @@ export function pickConfirmedCandidatesForApply(db, candidateIds, limit) {
   }
 
   return list.filter((item) => item.status === 'confirmed').slice(0, cap)
+}
+
+/**
+ * 采集时跳过的 BOSS/mock 职位 id：历史排除表 + 当前库内已终态职位
+ * @param {object} db
+ * @returns {Set<string>}
+ */
+export function getBlockedSourceIdsForCollect(db) {
+  const blocked = new Set()
+  for (const id of db.meta?.excludedSourceIds ?? []) {
+    if (id) blocked.add(String(id))
+  }
+  for (const c of db.candidates ?? []) {
+    if (['applied', 'replied', 'rejected'].includes(c.status) && c.sourceId) {
+      blocked.add(String(c.sourceId))
+    }
+  }
+  return blocked
+}
+
+function registerExcludedSourceId(db, sourceId) {
+  if (!sourceId) return
+  db.meta = { ...(db.meta ?? {}), excludedSourceIds: [...(db.meta?.excludedSourceIds ?? [])] }
+  const sid = String(sourceId)
+  if (!db.meta.excludedSourceIds.includes(sid)) {
+    db.meta.excludedSourceIds.push(sid)
+    const cap = 8000
+    if (db.meta.excludedSourceIds.length > cap) {
+      db.meta.excludedSourceIds = db.meta.excludedSourceIds.slice(-cap)
+    }
+  }
 }
 
 export async function writeDb(db) {
@@ -156,22 +189,40 @@ export async function clearAuth() {
 
 export async function addCandidates(items) {
   return updateDb((db) => {
+    const blocked = getBlockedSourceIdsForCollect(db)
     const existingIds = new Set(db.candidates.map((item) => item.sourceId))
+    for (const c of db.candidates) {
+      c.isNew = false
+    }
+
     const inserted = []
+    let skippedBlocked = 0
+    let skippedDup = 0
     for (const item of items) {
-      if (existingIds.has(item.sourceId)) continue
+      if (!item?.sourceId) continue
+      if (blocked.has(item.sourceId)) {
+        skippedBlocked += 1
+        continue
+      }
+      if (existingIds.has(item.sourceId)) {
+        skippedDup += 1
+        continue
+      }
       const candidate = {
         id: crypto.randomUUID(),
         sourceId: item.sourceId,
         title: item.title,
         company: item.company,
+        companyScale: item.companyScale ?? '',
         city: item.city,
         salary: item.salary,
         experience: item.experience,
+        jobRequirement: item.jobRequirement ?? '',
         tags: item.tags ?? [],
         reason: item.reason ?? '',
         greeting: item.greeting ?? '',
         status: 'pending',
+        isNew: true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         appliedAt: null,
@@ -183,9 +234,28 @@ export async function addCandidates(items) {
       }
       db.candidates.unshift(candidate)
       inserted.push(candidate)
+      existingIds.add(item.sourceId)
+    }
+    if (skippedBlocked) {
+      addLog(db, 'info', `采集筛选：跳过已投递/已回复/已拒绝（或已排除）的职位 ${skippedBlocked} 条`)
+    }
+    if (skippedDup) {
+      addLog(db, 'info', `采集去重：库内已有相同职位 ${skippedDup} 条，未重复添加`)
     }
     addLog(db, 'success', `采集完成，新增 ${inserted.length} 个候选职位`)
     return inserted
+  })
+}
+
+export async function clearAllCandidateNewFlags() {
+  return updateDb((db) => {
+    let n = 0
+    for (const c of db.candidates) {
+      if (c.isNew) n += 1
+      c.isNew = false
+    }
+    if (n) addLog(db, 'info', `已清除 ${n} 条「新岗位」角标`)
+    return { cleared: n }
   })
 }
 
@@ -196,6 +266,9 @@ export async function updateCandidateStatus(id, status) {
     item.status = status
     item.updatedAt = new Date().toISOString()
     if (status === 'applied') item.appliedAt = new Date().toISOString()
+    if (['applied', 'replied', 'rejected'].includes(status)) {
+      registerExcludedSourceId(db, item.sourceId)
+    }
     addLog(db, 'info', `${item.company} - ${item.title} 状态更新为 ${status}`)
     return item
   })
@@ -209,6 +282,9 @@ export async function batchUpdateStatus(ids, status) {
       item.status = status
       item.updatedAt = new Date().toISOString()
       if (status === 'applied') item.appliedAt = new Date().toISOString()
+      if (['applied', 'replied', 'rejected'].includes(status)) {
+        registerExcludedSourceId(db, item.sourceId)
+      }
       count += 1
     }
     addLog(db, 'info', `批量更新 ${count} 个职位为 ${status}`)
@@ -270,6 +346,13 @@ export async function replaceDb(nextDb) {
     auth: {
       ...defaultDb.auth,
       ...(nextDb.auth ?? {})
+    },
+    meta: {
+      ...defaultDb.meta,
+      ...(nextDb.meta ?? {}),
+      excludedSourceIds: Array.isArray(nextDb.meta?.excludedSourceIds)
+        ? nextDb.meta.excludedSourceIds
+        : defaultDb.meta.excludedSourceIds
     },
     candidates: Array.isArray(nextDb.candidates) ? nextDb.candidates : [],
     logs: Array.isArray(nextDb.logs) ? nextDb.logs : []
