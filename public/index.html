@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>海投助手 Next</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=2" />
   </head>
   <body>
     <aside class="sidebar">
@@ -24,6 +24,7 @@
       </nav>
       <div class="side-actions">
         <button id="collectBtn" class="primary">开始采集</button>
+        <button id="collectMobileBtn">App 端采集</button>
         <button id="applyBtn">投递已确认</button>
         <button id="applyOriginalBtn" class="secondary">原始风格</button>
       </div>
@@ -107,9 +108,39 @@
 
       <section id="config" class="view">
         <form id="configForm" class="panel form-grid">
-          <label>
-            职位关键词
-            <textarea name="keywords" rows="3" placeholder="前端, Vue, React"></textarea>
+          <label class="wide keyword-field-wrap">
+            投递岗位（BOSS 搜索词）
+            <div class="keyword-mode-row">
+              <span class="muted-inline">关键词方式</span>
+              <label class="inline-choice"
+                ><input type="radio" name="keywordsMode" value="single" /> 单选</label
+              >
+              <label class="inline-choice"
+                ><input type="radio" name="keywordsMode" value="multiple" checked /> 复选</label
+              >
+              <span class="muted-inline">多关键词请选「复选」；开始采集时会自动保存当前勾选</span>
+            </div>
+            <div class="keyword-dropdown">
+              <button
+                type="button"
+                id="keywordDropdownTrigger"
+                class="keyword-dropdown-trigger"
+                aria-expanded="false"
+                aria-haspopup="listbox"
+              >
+                <span id="keywordDropdownSummary">点击选择岗位…</span>
+                <span class="keyword-dropdown-chev" aria-hidden="true"></span>
+              </button>
+              <div id="keywordDropdownPanel" class="keyword-dropdown-panel" hidden>
+                <div id="keywordPresetContainer" class="keyword-preset-container"></div>
+              </div>
+            </div>
+            <textarea
+              name="keywordExtra"
+              rows="2"
+              class="keyword-extra"
+              placeholder="其他关键词可选，逗号或换行分隔（如历史配置里的非标词）"
+            ></textarea>
           </label>
           <label>
             城市
@@ -135,14 +166,51 @@
             排除关键词
             <textarea name="excludeKeywords" rows="3" placeholder="外包, 驻场"></textarea>
           </label>
-          <label>
-            公司黑名单
-            <textarea name="blacklistCompanies" rows="3" placeholder="每行或逗号分隔"></textarea>
+          <div class="wide form-field">
+            <label>公司过滤（勾选后跳过）</label>
+            <div class="multi-select-wrap" id="outsourcingFilterWrap">
+              <button
+                type="button"
+                id="outsourcingFilterTrigger"
+                class="multi-select-trigger"
+                aria-expanded="false"
+              >
+                <span id="outsourcingFilterSummary">未选择过滤公司…</span>
+                <span class="multi-select-chev"></span>
+              </button>
+              <div id="outsourcingFilterPanel" class="multi-select-panel" hidden>
+                <div class="multi-select-actions">
+                  <button type="button" id="outsourcingSelectAll" class="text-btn">全选</button>
+                  <button type="button" id="outsourcingDeselectAll" class="text-btn">清空</button>
+                </div>
+                <div id="outsourcingCheckboxList" class="multi-select-list"></div>
+              </div>
+            </div>
+          </div>
+          <label class="wide">
+            额外排除公司（每行或逗号分隔）
+            <textarea name="blacklistCompanies" rows="3" placeholder="不在列表中的其他公司，手动填写"></textarea>
           </label>
           <label class="wide">
             招呼语模板
             <textarea name="greetingTemplates" rows="5" placeholder="支持 {职位名称}、{公司名称}、{城市}"></textarea>
           </label>
+          <div class="wide form-field">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="scheduleEnabled" name="scheduleEnabled" />
+              启用定时采集
+            </label>
+            <div class="schedule-options" id="scheduleOptions">
+              <label>
+                采集时段
+                <div class="time-slots" id="timeSlots"></div>
+              </label>
+              <label class="wide">
+                执行日
+                <div class="day-picker" id="dayPicker"></div>
+              </label>
+            </div>
+          </div>
           <div class="wide form-actions">
             <button type="submit" class="primary">保存配置</button>
           </div>
@@ -158,6 +226,7 @@
             </div>
             <div class="filters">
               <select id="statusFilter">
+                <option value="actionable" selected>待处理（推荐）</option>
                 <option value="all">全部状态</option>
                 <option value="pending">待确认</option>
                 <option value="confirmed">已确认</option>
@@ -202,6 +271,6 @@
     </main>
 
     <div id="toast" class="toast"></div>
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js?v=2" type="module"></script>
   </body>
 </html>

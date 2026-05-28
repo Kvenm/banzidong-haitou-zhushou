@@ -2,17 +2,13 @@ import {
   addCandidates,
   addLogEntry,
   batchUpdateStatus,
-  getBlockedSourceIdsForCollect,
   pickConfirmedCandidatesForApply,
   readDb,
+  syncExcludedFromCandidates,
   updateCandidateStatus
 } from '../store.js'
+import { normalizeSourceId } from '../jobFilters.js'
 import { launchBossBrowser } from './launchBossBrowser.mjs'
-import puppeteer from 'puppeteer-extra'
-import StealthPlugin from 'puppeteer-extra-plugin-stealth'
-
-// 使用 stealth 插件隐藏自动化特征
-puppeteer.use(StealthPlugin())
 
 const companies = [
   '晨星智能',
@@ -83,40 +79,186 @@ export async function collectCandidates(config) {
   return inserted
 }
 
-async function collectCandidatesFromBoss(config, auth) {
-  await addLogEntry('info', '开始真实采集：使用已保存 Cookie 请求 BOSS 职位接口')
+export async function collectCandidatesViaMobile(config) {
+  const db = await readDb()
+  const synced = syncExcludedFromCandidates(db)
+  if (synced > 0) {
+    const { writeDb } = await import('../store.js')
+    await writeDb(db)
+    await addLogEntry('info', `已补全 ${synced} 条历史「已投递/已拒绝」到排除列表`)
+  }
+
+  await addLogEntry('info', '启动 Android 模拟器 App 采集（BOSS App 原生接口）')
+  const keywords = config.keywords?.length ? config.keywords : ['测试工程师']
+  const cities = config.cities?.length ? config.cities : ['杭州']
+
+  const { spawn, execSync } = await import('node:child_process')
+
+  // 确保模拟器在后台运行
+  const avdName = 'boss_android'
+  const androidHome = process.env.ANDROID_HOME || process.env.HOME + '/Library/Android/sdk'
+  const emulatorPath = androidHome + '/emulator/emulator'
+  const adbPath = androidHome + '/platform-tools/adb'
+
+  try {
+    const devices = execSync(`"${adbPath}" devices`, { timeout: 5000 }).toString()
+    if (!devices.includes('emulator')) {
+      await addLogEntry('info', '[App采集] 正在启动 Android 模拟器...')
+      spawn(emulatorPath, ['-avd', avdName, '-no-boot-anim'], {
+        detached: true,
+        stdio: 'ignore'
+      }).unref()
+      await addLogEntry('info', '[App采集] 模拟器正在启动，约需 30-60 秒...')
+    }
+  } catch (e) {
+    await addLogEntry('warning', `[App采集] 模拟器启动检查失败: ${e.message}`)
+  }
+
+  const scriptPath = new URL('./collect_boss_app.py', import.meta.url).pathname
+
+  const result = await new Promise((resolve) => {
+    const child = spawn(
+      '.venv/bin/python3',
+      [
+        scriptPath,
+        '--keyword', keywords.join(','),
+        '--city', cities.join(','),
+        '--target', String(config.collectTargetPerQuery || 20),
+        '--skip-emulator-check'
+      ],
+      {
+        cwd: new URL('../../', import.meta.url).pathname,
+        timeout: 10 * 60 * 1000 // 10分钟超时
+      }
+    )
+
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+      const line = chunk.toString().trim()
+      if (line) addLogEntry('info', `[App采集] ${line.replace(/^\[collect_app\] /, '')}`)
+    })
+
+    child.on('close', (code) => {
+      try {
+        const data = JSON.parse(stdout.trim())
+        resolve(data)
+      } catch {
+        addLogEntry('error', `[App采集] Python脚本输出解析失败 (exit=${code}): ${stderr.slice(-200)}`)
+        resolve({ error: `脚本异常退出(${code})`, raw: stderr.slice(-500) })
+      }
+    })
+
+    child.on('error', (err) => {
+      addLogEntry('error', `[App采集] 无法启动脚本: ${err.message}`)
+      resolve({ error: err.message })
+    })
+  })
+
+  if (result.error) {
+    await addLogEntry('error', `[App采集] 失败: ${result.error}`)
+    return []
+  }
+
+  if (!Array.isArray(result) || result.length === 0) {
+    await addLogEntry('warning', '[App采集] 未采集到职位。请在模拟器中确认 BOSS App 已登录且网络正常。')
+    return []
+  }
+
+  // 转换卡片为候选格式
+  const items = result.map((card) => {
+    const normalized = normalizeBossJob(card, { keyword: keywords.join(','), city: cities.join(','), config })
+    if (!normalized) {
+      return {
+        sourceId: card.sourceId || `boss-app-${Date.now()}-${Math.random().toString(36).slice(2,9)}`,
+        title: card.title || '',
+        company: card.company || '',
+        city: card.city || '',
+        salary: card.salary || '',
+        experience: card.experience || '',
+        reason: `App端采集: ${keywords.join(',')} - ${cities.join(',')}`,
+      }
+    }
+    return normalized
+  }).filter(Boolean)
+
+  const inserted = await addCandidates(items)
+  if (inserted.length > 0) {
+    await addLogEntry('success', `[App采集] 完成，新增 ${inserted.length} 个候选职位（Python 脚本返回 ${result.length} 条）`)
+  } else {
+    await addLogEntry('warning', `[App采集] Python 脚本返回 ${result.length} 条，但在排除列表或已存在，未新增。`)
+  }
+  return inserted
+}
+
+function isBossAntiBotMessage(msg) {
+  const s = String(msg ?? '')
+  return /环境.*异常|异常|频繁|验证|风控|risk|denied/i.test(s)
+}
+
+function appendBossSearchParams(url, { keyword, cityCode, page, pageSize }) {
+  url.searchParams.set('scene', '1')
+  url.searchParams.set('query', keyword)
+  url.searchParams.set('page', String(page))
+  url.searchParams.set('pageSize', String(pageSize))
+  if (cityCode) url.searchParams.set('city', cityCode)
+  for (const k of [
+    'experience',
+    'payType',
+    'partTime',
+    'degree',
+    'industry',
+    'scale',
+    'stage',
+    'position',
+    'jobType',
+    'salary',
+    'multiBusinessDistrict',
+    'multiSubway'
+  ]) {
+    if (!url.searchParams.has(k)) url.searchParams.set(k, '')
+  }
+}
+
+async function collectCandidatesFromBossFetch(config, auth) {
   const cookieHeader = buildCookieHeader(auth.bossCookieJson)
   const keywords = config.keywords?.length ? config.keywords : ['软件测试']
   const cities = config.cities?.length ? config.cities : ['杭州']
   const items = []
   const dedupe = new Set()
   const pageSize = 30
-  const maxPages = 8
+  const maxPages = 30
+  let grossJobCardsSeen = 0
+  let antiBotHits = 0
 
   for (const keyword of keywords) {
     for (const city of cities) {
       const cityCode = cityCodeMap[city] ?? ''
-      let pageEmpty = 0
       for (let page = 1; page <= maxPages; page += 1) {
         const url = new URL('https://www.zhipin.com/wapi/zpgeek/search/joblist.json')
-        url.searchParams.set('query', keyword)
-        url.searchParams.set('page', String(page))
-        url.searchParams.set('pageSize', String(pageSize))
-        if (cityCode) url.searchParams.set('city', cityCode)
+        appendBossSearchParams(url, { keyword, cityCode, page, pageSize })
 
         const response = await fetch(url, {
           headers: {
             accept: 'application/json, text/plain, */*',
             cookie: cookieHeader,
             referer: `https://www.zhipin.com/web/geek/job?query=${encodeURIComponent(keyword)}${cityCode ? `&city=${cityCode}` : ''}`,
+            origin: 'https://www.zhipin.com',
+            'x-requested-with': 'XMLHttpRequest',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
             'user-agent':
-              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
           }
         })
 
         const text = await response.text()
         if (!response.ok) {
           await addLogEntry('error', `BOSS 接口请求失败：HTTP ${response.status}`)
+          antiBotHits += 1
           break
         }
 
@@ -125,42 +267,74 @@ async function collectCandidatesFromBoss(config, auth) {
           payload = JSON.parse(text)
         } catch {
           await addLogEntry('error', 'BOSS 返回内容不是 JSON，可能 Cookie 失效或触发风控')
+          antiBotHits += 1
           break
         }
 
         if (payload.code !== 0) {
-          await addLogEntry('error', `BOSS 返回失败：${payload.message || payload.msg || `code=${payload.code}`}`)
+          const msg = payload.message || payload.msg || `code=${payload.code}`
+          await addLogEntry('error', `BOSS 返回失败：${msg}`)
+          if (isBossAntiBotMessage(msg)) antiBotHits += 1
           break
         }
 
         const jobList = extractBossJobList(payload)
-        if (!jobList.length) {
-          pageEmpty += 1
-          if (pageEmpty >= 1) break
-          continue
-        }
-        pageEmpty = 0
+        if (!jobList.length) break
+
+        grossJobCardsSeen += jobList.length
         await addLogEntry('info', `${city} / ${keyword} 第 ${page} 页返回 ${jobList.length} 个职位`)
         for (const raw of jobList) {
           const normalized = normalizeBossJob(raw, { keyword, city, config })
-          if (normalized && !dedupe.has(normalized.sourceId)) {
-            dedupe.add(normalized.sourceId)
-            items.push(normalized)
-          }
+          if (!normalized) continue
+          const sid = normalizeSourceId(normalized.sourceId)
+          if (!sid || dedupe.has(sid)) continue
+
+          normalized.sourceId = sid
+          dedupe.add(sid)
+          items.push(normalized)
         }
         if (jobList.length < pageSize) break
       }
     }
   }
 
+  const useBrowserFallback = grossJobCardsSeen === 0 && antiBotHits > 0
+
+  return {
+    items,
+    grossJobCardsSeen,
+    keywords,
+    cities,
+    useBrowserFallback
+  }
+}
+
+async function collectCandidatesFromBoss(config, auth) {
+  await addLogEntry('info', '开始真实采集：使用浏览器直连 BOSS（避免 Node fetch 触发「环境异常」风控）')
+  const db = await readDb()
+  const synced = syncExcludedFromCandidates(db)
+  if (synced > 0) {
+    const { writeDb } = await import('../store.js')
+    await writeDb(db)
+    await addLogEntry('info', `已补全 ${synced} 条历史「已投递/已拒绝」到排除列表，避免重复采集`)
+  }
+
+  const { collectBossJobsViaBrowser } = await import('./collectBossViaBrowser.mjs')
+  const browserResult = await collectBossJobsViaBrowser(config, auth, db, {
+    extractBossJobList,
+    normalizeBossJob,
+    cityCodeMap
+  })
+  const items = browserResult.items
+
   const inserted = await addCandidates(items)
   if (inserted.length === 0 && items.length > 0) {
     await addLogEntry(
       'warning',
-      `本批从 BOSS 拉取 ${items.length} 条不同职位，但均在「已投递/已拒绝」排除列表或已在库中，未新增。可尝试换关键词/城市或多页已自动翻取。`
+      `本批从 BOSS 拉取 ${items.length} 条不同职位，但均在「已投递/已拒绝」排除列表或已在库中，未新增。可尝试换关键词/城市。`
     )
   } else if (inserted.length === 0 && items.length === 0) {
-    await addLogEntry('warning', '未从 BOSS 拉取到职位（检查 Cookie、关键词或接口返回）')
+    await addLogEntry('warning', '未从 BOSS 拉取到职位（检查 Cookie 是否过期，或尝试重新获取 Cookie）')
   }
   await addLogEntry('success', `真实采集完成，新增 ${inserted.length} 条候选`)
   return inserted
@@ -481,14 +655,15 @@ function normalizeBossJob(raw, { keyword, city, config }) {
   const title = f.jobName ?? f.title ?? f.positionName
   const company =
     companyInfo.brandName ?? companyInfo.companyName ?? f.brandName ?? f.companyName
-  const sourceId = f.encryptJobId ?? f.encryptId
-  if (!title || !company || !sourceId) return null
+  const encryptId = f.encryptJobId ?? f.encryptId
+  if (!title || !company || !encryptId) return null
+  const sourceId = normalizeSourceId(encryptId)
 
   const salary = f.salaryDesc ?? f.salary ?? ''
   const companyScale = resolveCompanyScale(f, companyInfo, raw)
   const jobRequirement = buildJobRequirement(f, raw)
   return {
-    sourceId: `boss-${sourceId}`,
+    sourceId,
     title,
     company,
     companyScale,
@@ -505,7 +680,7 @@ function normalizeBossJob(raw, { keyword, city, config }) {
       city: f.cityName ?? city
     }),
     raw: {
-      encryptJobId: sourceId,
+      encryptJobId: encryptId,
       encryptBossId: bossInfo.encryptBossId ?? f.encryptBossId ?? raw.encryptBossId,
       encryptCompanyId: companyInfo.encryptCompanyId ?? f.encryptCompanyId ?? raw.encryptCompanyId
     }

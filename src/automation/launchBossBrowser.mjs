@@ -1,10 +1,25 @@
 import { addLogEntry } from '../store.js'
+import path from 'node:path'
+import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const dataDir = path.resolve(__dirname, '../../data')
+const BOSS_PROFILE_DIR = path.join(dataDir, 'boss-browser-profile')
+
+function ensureProfileDir() {
+  if (!fs.existsSync(BOSS_PROFILE_DIR)) {
+    fs.mkdirSync(BOSS_PROFILE_DIR, { recursive: true })
+    fs.mkdirSync(path.join(BOSS_PROFILE_DIR, 'Default'), { recursive: true })
+  }
+}
 
 /** BOSS 场景下降低自动化痕迹的 Chromium 参数（与 stealth 互补） */
 const DEFAULT_BOSS_CHROME_ARGS = [
   '--disable-blink-features=AutomationControlled',
   '--window-size=1440,900',
-  '--lang=zh-CN,zh;q=0.9'
+  '--lang=zh-CN,zh;q=0.9',
+  '--restore-last-session'
 ]
 
 /**
@@ -19,9 +34,11 @@ export async function launchBossBrowser(puppeteer, options = {}) {
   const useSystemChromeFirst =
     preferSystemChrome === true || process.env.HAITOU_PREFER_SYSTEM_CHROME === '1'
   const mergedArgs = [...DEFAULT_BOSS_CHROME_ARGS, ...(extraArgs?.length ? extraArgs : [])]
+  ensureProfileDir()
   const common = {
     headless: false,
     acceptInsecureCerts: true,
+    userDataDir: BOSS_PROFILE_DIR,
     args: mergedArgs,
     ...(defaultViewport ? { defaultViewport } : {}),
     ...rest

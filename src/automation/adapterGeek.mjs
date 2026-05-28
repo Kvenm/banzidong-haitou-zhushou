@@ -6,6 +6,7 @@ import {
 } from '../store.js'
 import { launchBossBrowser } from './launchBossBrowser.mjs'
 import { injectBossLocalStorage } from './injectBossLocalStorage.mjs'
+import { resolveBossPuppeteer } from './bossPuppeteer.mjs'
 
 /**
  * 参照原始 GeekGeekRun 的核心策略
@@ -20,47 +21,8 @@ import { injectBossLocalStorage } from './injectBossLocalStorage.mjs'
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 const sleepWithRandomDelay = (baseMs) => sleep(baseMs + Math.random() * 1000)
 
-/** puppeteer-extra 为单例，重复 .use() 会叠插件导致 launch 异常，只注册一次 */
-let geekPuppeteerPluginsReady = false
-
 async function resolvePuppeteerForGeek() {
-  let puppeteer
-  try {
-    const imported = await import('puppeteer-extra')
-    puppeteer = imported.default
-  } catch {
-    await addLogEntry('error', 'puppeteer-extra 未安装，回退到 puppeteer')
-    const stdPuppeteer = await import('puppeteer')
-    puppeteer = stdPuppeteer.default
-    return { puppeteer }
-  }
-
-  if (!geekPuppeteerPluginsReady) {
-    try {
-      const stealth = (await import('puppeteer-extra-plugin-stealth')).default
-      puppeteer.use(stealth())
-    } catch (e) {
-      await addLogEntry('warning', `Stealth 插件加载失败：${e.message}`)
-    }
-    try {
-      const laodengMod = await import('@geekgeekrun/puppeteer-extra-plugin-laodeng')
-      const Laodeng = laodengMod.default ?? laodengMod
-      puppeteer.use(Laodeng())
-      await addLogEntry('info', '已加载 GeekGeekRun 同款 laodeng 反检测插件')
-    } catch (e) {
-      await addLogEntry('warning', `laodeng 插件未加载（与 geek 行为可能不一致）：${e.message}`)
-    }
-    try {
-      const anonymize = (await import('puppeteer-extra-plugin-anonymize-ua')).default
-      puppeteer.use(anonymize({ makeWindows: false }))
-      await addLogEntry('info', '已加载反爬虫插件（stealth + laodeng + anonymize-ua）')
-    } catch (e) {
-      await addLogEntry('warning', `UA 匿名插件加载失败：${e.message}`)
-    }
-    geekPuppeteerPluginsReady = true
-  }
-
-  return { puppeteer }
+  return resolveBossPuppeteer()
 }
 
 /**

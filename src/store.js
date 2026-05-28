@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { normalizeSourceId, sourceIdVariants } from './jobFilters.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
@@ -15,11 +16,22 @@ const defaultConfig = {
   experience: '3-5年',
   excludeKeywords: ['外包', '驻场', '销售'],
   blacklistCompanies: [],
+  excludeOutsourcingCompanies: [],
   greetingTemplates: [
     '您好，我对贵司的{职位名称}很感兴趣，我有相关经验，希望可以进一步沟通。',
     '您好，看到贵司{公司名称}正在招聘{职位名称}，岗位方向和我的经历比较匹配，方便进一步了解吗？'
   ],
-  dailyApplyLimit: 30
+  dailyApplyLimit: 30,
+  /** 预设岗位：单选或多选采集关键词 */
+  keywordsMode: 'multiple',
+  /** 每个关键词×城市组合至少采集 N 条新职位 */
+  collectTargetPerQuery: 20,
+  /** 定时采集 */
+  scheduleEnabled: false,
+  scheduleTimes: ['21:00', '21:30'],
+  scheduleDays: [1, 2, 3, 4, 5],
+  /** 移动端模拟采集：模拟 App 端 UA/视口获取更优质推荐 */
+  mobileCollectionEnabled: true
 }
 
 const defaultDb = {
@@ -53,7 +65,12 @@ async function ensureDb() {
 export async function readDb() {
   await ensureDb()
   const raw = await fs.readFile(dbPath, 'utf8')
-  return JSON.parse(raw)
+  const db = JSON.parse(raw)
+  const synced = syncExcludedFromCandidates(db)
+  if (synced > 0) {
+    await writeDb(db)
+  }
+  return db
 }
 
 /**
@@ -84,23 +101,43 @@ export function pickConfirmedCandidatesForApply(db, candidateIds, limit) {
  * @param {object} db
  * @returns {Set<string>}
  */
+const TERMINAL_STATUSES = ['applied', 'replied', 'rejected']
+
 export function getBlockedSourceIdsForCollect(db) {
   const blocked = new Set()
-  for (const id of db.meta?.excludedSourceIds ?? []) {
-    if (id) blocked.add(String(id))
+  const add = (id) => {
+    for (const v of sourceIdVariants(id)) blocked.add(v)
   }
+  for (const id of db.meta?.excludedSourceIds ?? []) add(id)
   for (const c of db.candidates ?? []) {
-    if (['applied', 'replied', 'rejected'].includes(c.status) && c.sourceId) {
-      blocked.add(String(c.sourceId))
-    }
+    if (TERMINAL_STATUSES.includes(c.status) && c.sourceId) add(c.sourceId)
   }
   return blocked
+}
+
+export function isSourceIdBlocked(blocked, sourceId) {
+  if (!sourceId) return false
+  return sourceIdVariants(sourceId).some((v) => blocked.has(v))
+}
+
+/** 将库内已终态职位的 sourceId 补全进 excludedSourceIds（修复历史数据漏记） */
+export function syncExcludedFromCandidates(db) {
+  let added = 0
+  for (const c of db.candidates ?? []) {
+    if (TERMINAL_STATUSES.includes(c.status) && c.sourceId) {
+      const before = (db.meta?.excludedSourceIds ?? []).length
+      registerExcludedSourceId(db, c.sourceId)
+      if ((db.meta?.excludedSourceIds ?? []).length > before) added += 1
+    }
+  }
+  return added
 }
 
 function registerExcludedSourceId(db, sourceId) {
   if (!sourceId) return
   db.meta = { ...(db.meta ?? {}), excludedSourceIds: [...(db.meta?.excludedSourceIds ?? [])] }
-  const sid = String(sourceId)
+  const sid = normalizeSourceId(sourceId)
+  if (!sid) return
   if (!db.meta.excludedSourceIds.includes(sid)) {
     db.meta.excludedSourceIds.push(sid)
     const cap = 8000
@@ -133,14 +170,23 @@ export async function getConfig() {
 
 export async function saveConfig(config) {
   return updateDb((db) => {
+    const keywords = normalizeList(config.keywords)
+    let keywordsMode = config.keywordsMode === 'single' ? 'single' : 'multiple'
+    if (keywords.length > 1) keywordsMode = 'multiple'
     db.config = {
       ...defaultConfig,
       ...config,
-      keywords: normalizeList(config.keywords),
+      keywordsMode,
+      keywords,
       cities: normalizeList(config.cities),
       excludeKeywords: normalizeList(config.excludeKeywords),
       blacklistCompanies: normalizeList(config.blacklistCompanies),
-      greetingTemplates: normalizeList(config.greetingTemplates)
+      excludeOutsourcingCompanies: Array.isArray(config.excludeOutsourcingCompanies) ? config.excludeOutsourcingCompanies : [],
+      greetingTemplates: normalizeList(config.greetingTemplates),
+      scheduleEnabled: Boolean(config.scheduleEnabled),
+      scheduleTimes: Array.isArray(config.scheduleTimes) && config.scheduleTimes.length ? config.scheduleTimes : ['21:00', '21:30'],
+      scheduleDays: Array.isArray(config.scheduleDays) && config.scheduleDays.length ? config.scheduleDays.map(Number) : [1, 2, 3, 4, 5],
+      mobileCollectionEnabled: config.mobileCollectionEnabled !== false
     }
     addLog(db, 'success', '配置已保存')
     return db.config
@@ -189,8 +235,12 @@ export async function clearAuth() {
 
 export async function addCandidates(items) {
   return updateDb((db) => {
+    syncExcludedFromCandidates(db)
     const blocked = getBlockedSourceIdsForCollect(db)
-    const existingIds = new Set(db.candidates.map((item) => item.sourceId))
+    const existingIds = new Set()
+    for (const item of db.candidates) {
+      for (const v of sourceIdVariants(item.sourceId)) existingIds.add(v)
+    }
     for (const c of db.candidates) {
       c.isNew = false
     }
@@ -198,19 +248,24 @@ export async function addCandidates(items) {
     const inserted = []
     let skippedBlocked = 0
     let skippedDup = 0
+    let skippedInvalid = 0
     for (const item of items) {
-      if (!item?.sourceId) continue
-      if (blocked.has(item.sourceId)) {
+      if (!item?.sourceId) {
+        skippedInvalid += 1
+        continue
+      }
+      const canonicalSourceId = normalizeSourceId(item.sourceId)
+      if (isSourceIdBlocked(blocked, canonicalSourceId)) {
         skippedBlocked += 1
         continue
       }
-      if (existingIds.has(item.sourceId)) {
+      if (sourceIdVariants(canonicalSourceId).some((v) => existingIds.has(v))) {
         skippedDup += 1
         continue
       }
       const candidate = {
         id: crypto.randomUUID(),
-        sourceId: item.sourceId,
+        sourceId: canonicalSourceId,
         title: item.title,
         company: item.company,
         companyScale: item.companyScale ?? '',
@@ -234,8 +289,31 @@ export async function addCandidates(items) {
       }
       db.candidates.unshift(candidate)
       inserted.push(candidate)
-      existingIds.add(item.sourceId)
+      for (const v of sourceIdVariants(canonicalSourceId)) existingIds.add(v)
     }
+    const excludedCount = (db.meta?.excludedSourceIds ?? []).length
+    const summaryParts = [
+      `入参 ${items.length} 条`,
+      `新增 ${inserted.length}`,
+      `排除(已投递/拒绝等或 excluded 表) ${skippedBlocked}`,
+      `去重(库内已有同一职位) ${skippedDup}`
+    ]
+    if (skippedInvalid) summaryParts.push(`无效(缺少 sourceId) ${skippedInvalid}`)
+    addLog(
+      db,
+      'info',
+      `[入库分析] ${summaryParts.join('，')} · 当前 excludedSourceIds 约 ${excludedCount} 条`,
+      {
+        collectStats: {
+          totalInput: items.length,
+          newInserted: inserted.length,
+          skippedBlocked,
+          skippedDup,
+          skippedInvalid,
+          excludedSourceIdsApprox: excludedCount
+        }
+      }
+    )
     if (skippedBlocked) {
       addLog(db, 'info', `采集筛选：跳过已投递/已回复/已拒绝（或已排除）的职位 ${skippedBlocked} 条`)
     }
@@ -266,8 +344,9 @@ export async function updateCandidateStatus(id, status) {
     item.status = status
     item.updatedAt = new Date().toISOString()
     if (status === 'applied') item.appliedAt = new Date().toISOString()
-    if (['applied', 'replied', 'rejected'].includes(status)) {
+    if (TERMINAL_STATUSES.includes(status)) {
       registerExcludedSourceId(db, item.sourceId)
+      item.isNew = false
     }
     addLog(db, 'info', `${item.company} - ${item.title} 状态更新为 ${status}`)
     return item
@@ -282,8 +361,9 @@ export async function batchUpdateStatus(ids, status) {
       item.status = status
       item.updatedAt = new Date().toISOString()
       if (status === 'applied') item.appliedAt = new Date().toISOString()
-      if (['applied', 'replied', 'rejected'].includes(status)) {
+      if (TERMINAL_STATUSES.includes(status)) {
         registerExcludedSourceId(db, item.sourceId)
+        item.isNew = false
       }
       count += 1
     }
@@ -357,6 +437,7 @@ export async function replaceDb(nextDb) {
     candidates: Array.isArray(nextDb.candidates) ? nextDb.candidates : [],
     logs: Array.isArray(nextDb.logs) ? nextDb.logs : []
   }
+  syncExcludedFromCandidates(merged)
   await writeDb(merged)
   return merged
 }

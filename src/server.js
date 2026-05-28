@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  addLogEntry,
   batchUpdateStatus,
   clearAllCandidateNewFlags,
   clearAuth,
@@ -14,7 +15,7 @@ import {
   saveConfig,
   updateCandidateStatus
 } from './store.js'
-import { applyConfirmedCandidates, collectCandidates } from './automation/adapter.js'
+import { applyConfirmedCandidates, collectCandidates, collectCandidatesViaMobile } from './automation/adapter.js'
 import { applyConfirmedCandidatesGeekStyle } from './automation/adapterGeek.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -45,6 +46,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`海投助手 Next 已启动: http://127.0.0.1:${port}`)
+  startScheduleTimer()
 })
 
 async function handleApi(req, res, url) {
@@ -71,8 +73,34 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/collect') {
+    const body = await readBody(req)
     const db = await readDb()
-    sendJson(res, 200, { candidates: await collectCandidates(db.config) })
+    if (body?.config && typeof body.config === 'object') {
+      const keywords = normalizeCollectKeywords(body.config.keywords)
+      if (keywords.length) {
+        db.config = {
+          ...db.config,
+          ...body.config,
+          keywords,
+          keywordsMode: body.config.keywordsMode === 'single' ? 'single' : 'multiple'
+        }
+      }
+    }
+    const keywordsUsed = db.config?.keywords?.length ? db.config.keywords : ['软件测试']
+    const candidates = await collectCandidates(db.config)
+    sendJson(res, 200, { candidates, keywordsUsed })
+    return
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/collect/mobile') {
+    const db = await readDb()
+    const keywordsUsed = db.config?.keywords?.length ? db.config.keywords : ['软件测试']
+    const cities = db.config?.cities?.length ? db.config.cities : ['杭州']
+    sendJson(res, 200, { status: 'started', keywordsUsed, cities })
+    const candidates = await collectCandidatesViaMobile(db.config)
+    if (candidates.length) {
+      await addLogEntry('success', `[移动端采集] 完成，共新增 ${candidates.length} 个候选职位`)
+    }
     return
   }
 
@@ -221,4 +249,67 @@ function normalizeCandidateIds(raw) {
   if (!Array.isArray(raw)) return null
   const ids = raw.map((id) => String(id).trim()).filter(Boolean)
   return ids.length ? ids : null
+}
+
+function normalizeCollectKeywords(raw) {
+  if (Array.isArray(raw)) {
+    return raw.map((item) => String(item).trim()).filter(Boolean)
+  }
+  return String(raw ?? '')
+    .split(/[,，\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+// ── 定时采集调度 ──
+let scheduleTimer = null
+let lastScheduledRun = ''
+
+function startScheduleTimer() {
+  if (scheduleTimer) clearInterval(scheduleTimer)
+  scheduleTimer = setInterval(checkSchedule, 30000)
+  console.log('定时采集调度已启动（每 30 秒检查一次）')
+}
+
+async function checkSchedule() {
+  try {
+    const db = await readDb()
+    const cfg = db.config || {}
+    if (!cfg.scheduleEnabled) return
+
+    const now = new Date()
+
+    // 检查星期
+    const days = Array.isArray(cfg.scheduleDays) ? cfg.scheduleDays : [1, 2, 3, 4, 5]
+    if (!days.includes(now.getDay())) return
+
+    // 检查多时间段
+    const times = Array.isArray(cfg.scheduleTimes) && cfg.scheduleTimes.length
+      ? cfg.scheduleTimes
+      : ['21:00', '21:30']
+
+    let matchedTime = null
+    for (const t of times) {
+      const [h, m] = String(t).trim().split(':').map(Number)
+      if (isNaN(h) || isNaN(m)) continue
+      // ±1 分钟容差
+      if (now.getHours() === h && now.getMinutes() >= m && now.getMinutes() <= m + 1) {
+        matchedTime = `${h}:${String(m).padStart(2, '0')}`
+        break
+      }
+    }
+    if (!matchedTime) return
+
+    // 防重复（同一时段只跑一次）
+    const runKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${matchedTime}`
+    if (lastScheduledRun === runKey) return
+    lastScheduledRun = runKey
+
+    await addLogEntry('info', `定时采集触发（${matchedTime}），开始自动采集…`)
+    const result = await collectCandidates(db.config)
+    const n = Array.isArray(result) ? result.length : 0
+    await addLogEntry('success', `定时采集完成（${matchedTime}），新增 ${n} 条候选`)
+  } catch (e) {
+    console.error('定时采集异常:', e.message)
+  }
 }
